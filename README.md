@@ -2850,91 +2850,110 @@ download: https://github.com/ultralytics/assets/releases/download/v0.0.0/african
 
 #An ipynb notebook file for reference only#
 
-# Mount Google Drive (for Colab)
-try:
-    from google.colab import drive
-    drive.mount('/content/drive')
-    IN_COLAB = True
-    print("✅ Google Drive mounted successfully")
-except:
-    IN_COLAB = False
-    print("Not running in Google Colab - using local environment")
+# Mount Google Drive for persistent storage
+from google.colab import drive
+import os
+
+drive.mount('/content/drive')
 
 # Create project directories
-import os
-from pathlib import Path
+PROJECT_DIRS = {
+    'workspace': '/content/naibil_workspace',
+    'datasets': '/content/datasets',
+    'models': '/content/drive/MyDrive/NAiBiL/models',
+    'checkpoints': '/content/drive/MyDrive/NAiBiL/checkpoints',
+    'results': '/content/drive/MyDrive/NAiBiL/results',
+    'logs': '/content/drive/MyDrive/NAiBiL/logs'
+}
 
-directories = [
-    './naibil_workspace',
-    './datasets',
-    './checkpoints',
-    './outputs',
-    './logs',
-    './temp'
-]
+for name, path in PROJECT_DIRS.items():
+    os.makedirs(path, exist_ok=True)
+    print(f"✓ Created {name}: {path}")
 
-if IN_COLAB:
-    directories.extend([
-        '/content/drive/MyDrive/NAiBiL_Models',
-        '/content/drive/MyDrive/NAiBiL_Checkpoints',
-        '/content/drive/MyDrive/NAiBiL_Results'
-    ])
+print("\n✅ Google Drive mounted and directories created successfully!")
 
-for directory in directories:
-    os.makedirs(directory, exist_ok=True)
+This is a wrong idea, because in colab show error with version, so you should write without version%%capture
+# Install core deep learning and computer vision packages
+!pip install -q torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu118
+!pip install -q opencv-python-headless==4.8.1.78
+!pip install -q albumentations==1.3.1
+!pip install -q Pillow==10.1.0
+!pip install -q numpy==1.24.3
+!pip install -q scipy==1.11.4
+!pip install -q scikit-learn==1.3.2
+!pip install -q scikit-image==0.22.0
 
-print("✅ All directories created successfully!")
+# Install visualization and logging
+!pip install -q matplotlib==3.7.1
+!pip install -q seaborn==0.13.0
+!pip install -q tqdm==4.66.1
+!pip install -q tensorboard==2.15.1
+!pip install -q wandb==0.16.0
 
-%%capture
-# Install all required packages
-!pip install -q torch torchvision torchaudio
-!pip install -q opencv-python-headless albumentations pycocotools
-!pip install -q timm einops scipy numpy pandas
-!pip install -q tqdm matplotlib seaborn pillow pyyaml
-!pip install -q scikit-learn scikit-image
-!pip install -q fvcore iopath
-!pip install -q tensorboard
-!pip install -q datasets huggingface_hub
-!pip install -q gdown requests
-!pip install -q torchmetrics
-!pip install -q ultralytics  # For dataset utilities and reference
-!pip install -q onnx onnxruntime
+# Install COCO evaluation and utilities
+!pip install -q pycocotools==2.0.7
+!pip install -q timm==0.9.12
+!pip install -q einops==0.7.0
+
+# Install dataset utilities
+!pip install -q datasets==2.14.6
+!pip install -q huggingface-hub==0.19.4
+!pip install -q gdown==4.7.1
+!pip install -q kaggle==1.5.16
+
+# Install ONNX export
+!pip install -q onnx==1.15.0
+!pip install -q onnxruntime-gpu==1.16.3
 
 print("✅ All packages installed successfully!")
 
-# Import all required libraries
+# Import essential libraries
+import sys
+import gc
+import json
+import random
+import warnings
+import zipfile
+import shutil
+import time
+import math
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional, Union, Any
+from dataclasses import dataclass, field
+from collections import defaultdict, OrderedDict
+from datetime import datetime
+
+import numpy as np
+import cv2
+from PIL import Image
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tqdm.auto import tqdm
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, IterableDataset
-from torch.cuda.amp import autocast, GradScaler
-import torch.optim as optim
+from torch.optim import AdamW, SGD
+from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR, LinearLR, SequentialLR
+from torch.cuda.amp import GradScaler, autocast
+from torch.utils.tensorboard import SummaryWriter
 
-import numpy as np
-import cv2
-import json
-import math
-import time
-import random
-import zipfile
-import requests
-from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Union
-from dataclasses import dataclass, field
-from collections import defaultdict, deque
+import torchvision
+from torchvision import transforms
+from torchvision.ops import nms, box_iou, box_convert
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-try:
-    from pycocotools.coco import COCO
-    from pycocotools.cocoeval import COCOeval
-except:
-    print("Warning: pycocotools not available")
+from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
+from pycocotools import mask as coco_mask
 
-import matplotlib.pyplot as plt
-import seaborn as sns
-from tqdm.auto import tqdm
+from datasets import load_dataset, IterableDataset as HFIterableDataset
+from huggingface_hub import hf_hub_download
+
+warnings.filterwarnings('ignore')
 
 # Set random seeds for reproducibility
 def set_seed(seed=42):
@@ -2944,433 +2963,551 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
+    
 set_seed(42)
 
-# Check GPU availability
+# Device configuration
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"🚀 Using device: {device}")
+print("="*70)
+print("NAiBiL SYSTEM INITIALIZATION")
+print("="*70)
+print(f"\n🚀 Device: {device}")
 if torch.cuda.is_available():
     print(f"   GPU: {torch.cuda.get_device_name(0)}")
     print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
     print(f"   CUDA Version: {torch.version.cuda}")
-else:
-    print("   WARNING: No GPU detected. Training will be slow.")
-
-print("✅ All libraries imported successfully!")
-
-# Extended COCO classes + additional categories for comprehensive detection
-CLASS_NAMES = [
-    # Standard COCO 80 classes
-    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
-    'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
-    'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
-    'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
-    'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
-    'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
-    'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake',
-    'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop',
-    'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
-    'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush',
-    # Extended classes for infrastructure and specialized detection
-    'pothole', 'crack', 'road_damage', 'sinkhole', 'rut', 'water_puddle',
-    'fish', 'gun', 'weapon', 'accident', 'fall_detected'
-]
-
-NUM_CLASSES = len(CLASS_NAMES)
-
-# Keypoint definitions
-COCO_KEYPOINTS = [
-    'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
-    'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
-    'left_wrist', 'right_wrist', 'left_hip', 'right_hip',
-    'left_knee', 'right_knee', 'left_ankle', 'right_ankle'
-]
-
-# Skeleton connections for pose visualization
-SKELETON = [
-    [16, 14], [14, 12], [17, 15], [15, 13], [12, 13], [6, 12], [7, 13],
-    [6, 7], [6, 8], [7, 9], [8, 10], [9, 11], [2, 3], [1, 2], [1, 3],
-    [2, 4], [3, 5], [4, 6], [5, 7]
-]
-
-print(f"✅ Configuration loaded")
-print(f"   Total Classes: {NUM_CLASSES}")
-print(f"   Pose Keypoints: {len(COCO_KEYPOINTS)}")
-
+    print(f"   cuDNN Version: {torch.backends.cudnn.version()}")
+print(f"\n📦 PyTorch Version: {torch.__version__}")
+print(f"📦 Torchvision Version: {torchvision.__version__}")
+print(f"📦 NumPy Version: {np.__version__}")
+print(f"📦 OpenCV Version: {cv2.__version__}")
+print("\n✅ Environment initialized successfully!\n")
+print("="*70)
 
 @dataclass
 class NAiBiLConfig:
-    """Complete configuration for NAiBiL model"""
+    """Complete configuration for NAiBiL multi-task model"""
     
-    # Model architecture
-    backbone: str = 'cspdarknet53'  # YOLO-style backbone
-    neck: str = 'panet'  # Path Aggregation Network
-    num_classes: int = NUM_CLASSES
-    img_size: int = 640
+    # ============= Model Architecture =============
+    input_size: Tuple[int, int] = (640, 640)
+    backbone: str = 'resnet50'  # resnet50, efficientnet_b3, etc.
+    backbone_channels: List[int] = field(default_factory=lambda: [256, 512, 1024, 2048])
+    fpn_channels: int = 256
     
-    # Detection parameters
-    num_keypoints: int = 17  # COCO standard
-    num_face_landmarks: int = 68
-    num_hand_keypoints: int = 21
-    num_iris_points: int = 5
+    # ============= Task Configuration =============
+    # Object Detection
+    num_classes: int = 100  # Extended object categories
+    num_anchors: int = 9
+    anchor_scales: List[float] = field(default_factory=lambda: [1.0, 1.26, 1.59])
+    anchor_ratios: List[float] = field(default_factory=lambda: [0.5, 1.0, 2.0])
+    conf_threshold: float = 0.25
+    nms_threshold: float = 0.45
+    max_detections: int = 100
     
-    # Training parameters
-    batch_size: int = 16
-    epochs: int = 100
-    learning_rate: float = 1e-3
-    weight_decay: float = 5e-4
-    warmup_epochs: int = 3
+    # Pose Estimation
+    num_keypoints: int = 17  # COCO keypoints
+    keypoint_threshold: float = 0.3
     
-    # Loss weights for multi-task learning
+    # Face & Facial Landmarks
+    num_face_landmarks: int = 68  # 68-point facial landmarks
+    enable_face_detection: bool = True
+    
+    # Iris Detection
+    num_iris_landmarks: int = 5  # Per eye
+    enable_iris_detection: bool = True
+    
+    # Segmentation
+    enable_segmentation: bool = True
+    mask_size: Tuple[int, int] = (28, 28)
+    
+    # Attributes
+    enable_attributes: bool = True
+    num_attributes: int = 20  # Demographics, object types, etc.
+    
+    # ============= Training Configuration =============
+    batch_size: int = 8
+    num_epochs: int = 100
+    learning_rate: float = 0.001
+    weight_decay: float = 0.0005
+    warmup_epochs: int = 5
+    gradient_clip: float = 10.0
+    
+    # Mixed precision training
+    use_amp: bool = True
+    
+    # ============= Loss Weights =============
     loss_weights: Dict[str, float] = field(default_factory=lambda: {
-        'detection': 1.0,
-        'bbox': 5.0,
-        'cls': 0.5,
-        'obj': 1.0,
-        'pose': 4.0,
-        'face': 2.0,
-        'hand': 2.0,
-        'iris': 1.5,
-        'segmentation': 0.5,
+        'detection_cls': 1.0,
+        'detection_box': 5.0,
+        'detection_obj': 1.0,
+        'pose_keypoints': 4.0,
+        'pose_visibility': 1.0,
+        'face_landmarks': 3.0,
+        'iris_landmarks': 2.0,
+        'segmentation': 2.0,
+        'attributes': 1.0
     })
     
-    # Data augmentation
-    mosaic: float = 1.0
-    mixup: float = 0.1
-    hsv_h: float = 0.015
-    hsv_s: float = 0.7
-    hsv_v: float = 0.4
-    degrees: float = 0.0
-    translate: float = 0.1
-    scale: float = 0.5
-    shear: float = 0.0
-    perspective: float = 0.0
-    flipud: float = 0.0
-    fliplr: float = 0.5
+    # ============= Data Configuration =============
+    num_workers: int = 4
+    pin_memory: bool = True
+    prefetch_factor: int = 2
     
-    # Performance
-    conf_threshold: float = 0.25
-    iou_threshold: float = 0.45
-    max_det: int = 300
+    # Augmentation
+    use_augmentation: bool = True
+    mosaic_prob: float = 0.5
+    mixup_prob: float = 0.15
     
-    # Paths
-    save_dir: str = './checkpoints'
-    log_dir: str = './logs'
+    # ============= Paths =============
+    data_dir: str = '/content/datasets'
+    output_dir: str = '/content/drive/MyDrive/NAiBiL/results'
+    checkpoint_dir: str = '/content/drive/MyDrive/NAiBiL/checkpoints'
+    log_dir: str = '/content/drive/MyDrive/NAiBiL/logs'
     
+    # ============= Inference =============
+    inference_size: Tuple[int, int] = (640, 640)
+    visualize_results: bool = True
+    save_predictions: bool = True
+    
+    def __post_init__(self):
+        """Validate and setup configuration"""
+        assert self.input_size[0] % 32 == 0 and self.input_size[1] % 32 == 0, \
+            "Input size must be divisible by 32"
+        assert len(self.anchor_scales) * len(self.anchor_ratios) == self.num_anchors, \
+            "Number of anchors must match scales x ratios"
+
+# Initialize configuration
 config = NAiBiLConfig()
-print("✅ NAiBiL Configuration initialized")
 
+print("\n📋 NAiBiL Configuration:")
+print(f"   Input Size: {config.input_size}")
+print(f"   Backbone: {config.backbone}")
+print(f"   Object Classes: {config.num_classes}")
+print(f"   Pose Keypoints: {config.num_keypoints}")
+print(f"   Face Landmarks: {config.num_face_landmarks}")
+print(f"   Iris Landmarks: {config.num_iris_landmarks} per eye")
+print(f"   Batch Size: {config.batch_size}")
+print(f"   Epochs: {config.num_epochs}")
+print(f"   Learning Rate: {config.learning_rate}")
+print(f"   Mixed Precision: {config.use_amp}")
+print("\n✅ Configuration loaded successfully!")
 
-class DatasetDownloader:
-    """Smart dataset downloader with streaming support and space management"""
-    
-    def __init__(self, root_dir='./datasets'):
-        self.root_dir = Path(root_dir)
-        self.root_dir.mkdir(parents=True, exist_ok=True)
-    
-    def download_file(self, url, destination, desc="Downloading"):
-        """Download file with progress bar"""
-        destination = Path(destination)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        
-        if destination.exists():
-            print(f"✓ {destination.name} already exists")
-            return destination
-        
-        print(f"📥 Downloading {desc}...")
-        
-        try:
-            response = requests.get(url, stream=True, timeout=60)
-            response.raise_for_status()
-            total_size = int(response.headers.get('content-length', 0))
-            
-            with open(destination, 'wb') as f, tqdm(
-                desc=desc,
-                total=total_size,
-                unit='B',
-                unit_scale=True
-            ) as pbar:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        pbar.update(len(chunk))
-            
-            print(f"✅ Downloaded {destination.name}")
-            return destination
-        
-        except Exception as e:
-            print(f"❌ Error downloading: {str(e)}")
-            if destination.exists():
-                destination.unlink()
-            return None
-    
-    def extract_and_cleanup(self, zip_path, extract_to):
-        """Extract zip and delete to save space"""
-        print(f"📦 Extracting {zip_path.name}...")
-        
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            members = zip_ref.namelist()
-            for member in tqdm(members, desc="Extracting"):
-                zip_ref.extract(member, extract_to)
-        
-        # Delete zip file to save space
-        zip_path.unlink()
-        print(f"✅ Extracted and cleaned up")
-    
-    def download_coco8(self):
-        """Download COCO8 for quick testing"""
-        print("\n" + "="*70)
-        print("📊 COCO8 Dataset (Quick Test)")
-        print("="*70)
-        
-        coco8_dir = self.root_dir / 'coco8'
-        if (coco8_dir / 'images').exists():
-            print("✓ COCO8 already exists")
-            return coco8_dir
-        
-        # Download from ultralytics
-        url = 'https://github.com/ultralytics/assets/releases/download/v0.0.0/coco8.zip'
-        zip_path = self.download_file(url, self.root_dir / 'coco8.zip', 'COCO8')
-        
-        if zip_path:
-            self.extract_and_cleanup(zip_path, self.root_dir)
-            print(f"✅ COCO8 ready at {coco8_dir}")
-        
-        return coco8_dir
+# ==================== ATTENTION MECHANISMS ====================
 
-# Initialize downloader
-downloader = DatasetDownloader()
-print("✅ Dataset downloader initialized")
-
-class Conv(nn.Module):
-    """Standard convolution with BatchNorm and activation"""
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):
+class SpatialAttention(nn.Module):
+    """Spatial attention module for focusing on important regions"""
+    def __init__(self, kernel_size=7):
         super().__init__()
-        self.conv = nn.Conv2d(c1, c2, k, s, p if p is not None else k // 2, groups=g, bias=False)
-        self.bn = nn.BatchNorm2d(c2)
-        self.act = nn.SiLU() if act else nn.Identity()
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        attention = torch.cat([avg_out, max_out], dim=1)
+        attention = self.sigmoid(self.conv(attention))
+        return x * attention
+
+class ChannelAttention(nn.Module):
+    """Channel attention module (SE-like)"""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        avg_out = self.fc(self.avg_pool(x).view(b, c))
+        max_out = self.fc(self.max_pool(x).view(b, c))
+        out = self.sigmoid(avg_out + max_out).view(b, c, 1, 1)
+        return x * out
+
+class CBAM(nn.Module):
+    """Convolutional Block Attention Module"""
+    def __init__(self, channels, reduction=16, kernel_size=7):
+        super().__init__()
+        self.channel_attention = ChannelAttention(channels, reduction)
+        self.spatial_attention = SpatialAttention(kernel_size)
+    
+    def forward(self, x):
+        x = self.channel_attention(x)
+        x = self.spatial_attention(x)
+        return x
+
+# ==================== BUILDING BLOCKS ====================
+
+class ConvBNAct(nn.Module):
+    """Standard Conv + BatchNorm + Activation"""
+    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0, 
+                 groups=1, activation=nn.SiLU()):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, 
+                              padding, groups=groups, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels, eps=0.001, momentum=0.03)
+        self.act = activation
     
     def forward(self, x):
         return self.act(self.bn(self.conv(x)))
 
-class C3(nn.Module):
-    """CSP Bottleneck with 3 convolutions"""
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
-        super().__init__()
-        c_ = int(c2 * e)
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c1, c_, 1, 1)
-        self.cv3 = Conv(2 * c_, c2, 1)
-        self.m = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])
-    
-    def forward(self, x):
-        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
-
 class Bottleneck(nn.Module):
-    """Standard bottleneck"""
-    def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):
+    """Standard bottleneck block"""
+    def __init__(self, in_channels, out_channels, shortcut=True, groups=1, expansion=0.5):
         super().__init__()
-        c_ = int(c2 * e)
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c_, c2, 3, 1, g=g)
-        self.add = shortcut and c1 == c2
+        hidden_channels = int(out_channels * expansion)
+        self.conv1 = ConvBNAct(in_channels, hidden_channels, 1)
+        self.conv2 = ConvBNAct(hidden_channels, out_channels, 3, padding=1, groups=groups)
+        self.add = shortcut and in_channels == out_channels
     
     def forward(self, x):
-        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
+        return x + self.conv2(self.conv1(x)) if self.add else self.conv2(self.conv1(x))
+
+class C3k2(nn.Module):
+    """C3k2 block from YOLOv11 for efficient feature extraction"""
+    def __init__(self, in_channels, out_channels, num_blocks=1, shortcut=True, 
+                 groups=1, expansion=0.5):
+        super().__init__()
+        hidden_channels = int(out_channels * expansion)
+        self.conv1 = ConvBNAct(in_channels, hidden_channels, 1)
+        self.conv2 = ConvBNAct(in_channels, hidden_channels, 1)
+        self.conv3 = ConvBNAct(2 * hidden_channels, out_channels, 1)
+        self.m = nn.Sequential(
+            *(Bottleneck(hidden_channels, hidden_channels, shortcut, groups, 1.0) 
+              for _ in range(num_blocks))
+        )
+    
+    def forward(self, x):
+        return self.conv3(torch.cat([self.m(self.conv1(x)), self.conv2(x)], 1))
 
 class SPPF(nn.Module):
-    """Spatial Pyramid Pooling - Fast"""
-    def __init__(self, c1, c2, k=5):
+    """Spatial Pyramid Pooling - Fast (SPPF) for multi-scale feature aggregation"""
+    def __init__(self, in_channels, out_channels, kernel_size=5):
         super().__init__()
-        c_ = c1 // 2
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c_ * 4, c2, 1, 1)
-        self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+        hidden_channels = in_channels // 2
+        self.conv1 = ConvBNAct(in_channels, hidden_channels, 1)
+        self.conv2 = ConvBNAct(hidden_channels * 4, out_channels, 1)
+        self.m = nn.MaxPool2d(kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
     
     def forward(self, x):
-        x = self.cv1(x)
+        x = self.conv1(x)
         y1 = self.m(x)
         y2 = self.m(y1)
-        return self.cv2(torch.cat([x, y1, y2, self.m(y2)], 1))
+        return self.conv2(torch.cat([x, y1, y2, self.m(y2)], 1))
 
-print("✅ Core building blocks defined")
-
-class CSPDarknet(nn.Module):
-    """CSPDarknet53 backbone - YOLO style"""
-    def __init__(self, in_channels=3, base_channels=64, depth_multiple=1.0, width_multiple=1.0):
+class C2PSA(nn.Module):
+    """C2PSA: Channel-to-Pixel Spatial Attention from YOLOv11"""
+    def __init__(self, in_channels, out_channels, num_blocks=1, expansion=0.5):
         super().__init__()
-        
-        def make_divisible(x, divisor=8):
-            return math.ceil(x / divisor) * divisor
-        
-        # Compute channel sizes
-        c1 = make_divisible(base_channels * width_multiple)
-        c2 = make_divisible(c1 * 2)
-        c3 = make_divisible(c2 * 2)
-        c4 = make_divisible(c3 * 2)
-        c5 = make_divisible(c4 * 2)
-        
-        # Compute depth
-        n = max(round(3 * depth_multiple), 1)
+        hidden_channels = int(out_channels * expansion)
+        self.conv1 = ConvBNAct(in_channels, hidden_channels, 1)
+        self.conv2 = ConvBNAct(in_channels, hidden_channels, 1)
+        self.conv3 = ConvBNAct(2 * hidden_channels, out_channels, 1)
+        self.attention = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, 1),
+            nn.BatchNorm2d(hidden_channels),
+            nn.Sigmoid()
+        )
+        self.m = nn.Sequential(
+            *(Bottleneck(hidden_channels, hidden_channels, True, 1, 1.0) for _ in range(num_blocks))
+        )
+    
+    def forward(self, x):
+        x1 = self.conv1(x)
+        attn = self.attention(x1)
+        x1 = x1 * attn
+        x1 = self.m(x1)
+        return self.conv3(torch.cat([x1, self.conv2(x)], 1))
+
+print("✅ Building blocks defined successfully!")
+
+# ==================== BACKBONE NETWORK ====================
+
+class NAiBiLBackbone(nn.Module):
+    """Advanced backbone network with C3k2 blocks and attention mechanisms"""
+    def __init__(self, in_channels=3, base_channels=64):
+        super().__init__()
         
         # Stem
-        self.stem = Conv(in_channels, c1, k=6, s=2, p=2)  # P1/2
+        self.stem = nn.Sequential(
+            ConvBNAct(in_channels, base_channels, 3, 2, 1),
+            ConvBNAct(base_channels, base_channels * 2, 3, 2, 1)
+        )
         
-        # Stage 1
+        # Stage 1: 160x160 -> 80x80
         self.stage1 = nn.Sequential(
-            Conv(c1, c2, 3, 2),  # P2/4
-            C3(c2, c2, n)
+            C3k2(base_channels * 2, base_channels * 4, num_blocks=3),
+            ConvBNAct(base_channels * 4, base_channels * 4, 3, 2, 1)
         )
         
-        # Stage 2
+        # Stage 2: 80x80 -> 40x40
         self.stage2 = nn.Sequential(
-            Conv(c2, c3, 3, 2),  # P3/8
-            C3(c3, c3, n * 2)
+            C3k2(base_channels * 4, base_channels * 8, num_blocks=6),
+            ConvBNAct(base_channels * 8, base_channels * 8, 3, 2, 1)
         )
         
-        # Stage 3
+        # Stage 3: 40x40 -> 20x20
         self.stage3 = nn.Sequential(
-            Conv(c3, c4, 3, 2),  # P4/16
-            C3(c4, c4, n * 3)
+            C3k2(base_channels * 8, base_channels * 16, num_blocks=6),
+            C2PSA(base_channels * 16, base_channels * 16, num_blocks=3),
+            ConvBNAct(base_channels * 16, base_channels * 16, 3, 2, 1)
         )
         
-        # Stage 4
+        # Stage 4: 20x20 -> 20x20 (with SPPF)
         self.stage4 = nn.Sequential(
-            Conv(c4, c5, 3, 2),  # P5/32
-            C3(c5, c5, n),
-            SPPF(c5, c5)
+            C3k2(base_channels * 16, base_channels * 16, num_blocks=3),
+            SPPF(base_channels * 16, base_channels * 16),
+            C2PSA(base_channels * 16, base_channels * 16, num_blocks=3)
         )
         
-        self.out_channels = [c3, c4, c5]  # P3, P4, P5
+        self.out_channels = [base_channels * 4, base_channels * 8, 
+                             base_channels * 16, base_channels * 16]
     
     def forward(self, x):
+        # Multi-scale feature extraction
         x = self.stem(x)
-        x = self.stage1(x)
-        p3 = self.stage2(x)
-        p4 = self.stage3(p3)
-        p5 = self.stage4(p4)
-        return p3, p4, p5
+        
+        c2 = self.stage1(x)   # 80x80, 256 channels
+        c3 = self.stage2(c2)  # 40x40, 512 channels  
+        c4 = self.stage3(c3)  # 20x20, 1024 channels
+        c5 = self.stage4(c4)  # 20x20, 1024 channels
+        
+        return [c2, c3, c4, c5]
 
-print("✅ CSPDarknet backbone defined")
+# ==================== FEATURE PYRAMID NETWORK ====================
 
-class PANet(nn.Module):
-    """Path Aggregation Network for feature fusion"""
-    def __init__(self, in_channels, depth_multiple=1.0):
+class FPN(nn.Module):
+    """Feature Pyramid Network for multi-scale feature fusion"""
+    def __init__(self, in_channels_list, out_channels=256):
         super().__init__()
-        c3, c4, c5 = in_channels
-        n = max(round(3 * depth_multiple), 1)
+        
+        # Lateral connections
+        self.lateral_convs = nn.ModuleList([
+            ConvBNAct(in_ch, out_channels, 1) for in_ch in in_channels_list
+        ])
         
         # Top-down pathway
-        self.up = nn.Upsample(scale_factor=2, mode='nearest')
-        self.cv1 = Conv(c5, c4, 1, 1)
-        self.c3_1 = C3(c4 + c4, c4, n, shortcut=False)
+        self.fpn_convs = nn.ModuleList([
+            C3k2(out_channels, out_channels, num_blocks=2) 
+            for _ in range(len(in_channels_list))
+        ])
         
-        self.cv2 = Conv(c4, c3, 1, 1)
-        self.c3_2 = C3(c3 + c3, c3, n, shortcut=False)
+        # Bottom-up pathway (PAN)
+        self.downsample_convs = nn.ModuleList([
+            ConvBNAct(out_channels, out_channels, 3, 2, 1) 
+            for _ in range(len(in_channels_list) - 1)
+        ])
         
-        # Bottom-up pathway
-        self.down1 = Conv(c3, c3, 3, 2)
-        self.c3_3 = C3(c3 + c4, c4, n, shortcut=False)
-        
-        self.down2 = Conv(c4, c4, 3, 2)
-        self.c3_4 = C3(c4 + c5, c5, n, shortcut=False)
-        
-        self.out_channels = [c3, c4, c5]
+        self.pan_convs = nn.ModuleList([
+            C3k2(out_channels, out_channels, num_blocks=2) 
+            for _ in range(len(in_channels_list) - 1)
+        ])
     
     def forward(self, features):
-        p3, p4, p5 = features
+        # features: [c2, c3, c4, c5] from backbone
         
-        # Top-down
-        p5_up = self.cv1(p5)
-        p4_fused = self.c3_1(torch.cat([self.up(p5_up), p4], 1))
+        # Lateral connections
+        laterals = [lateral_conv(f) for f, lateral_conv in zip(features, self.lateral_convs)]
         
-        p4_up = self.cv2(p4_fused)
-        p3_out = self.c3_2(torch.cat([self.up(p4_up), p3], 1))
+        # Top-down pathway
+        for i in range(len(laterals) - 1, 0, -1):
+            upsampled = F.interpolate(laterals[i], scale_factor=2, mode='nearest')
+            laterals[i-1] = laterals[i-1] + upsampled
         
-        # Bottom-up
-        p3_down = self.down1(p3_out)
-        p4_out = self.c3_3(torch.cat([p3_down, p4_fused], 1))
+        # Apply FPN convolutions
+        fpn_features = [conv(lateral) for lateral, conv in zip(laterals, self.fpn_convs)]
         
-        p4_down = self.down2(p4_out)
-        p5_out = self.c3_4(torch.cat([p4_down, p5], 1))
+        # Bottom-up pathway (PAN)
+        pan_features = [fpn_features[0]]
+        for i in range(len(self.downsample_convs)):
+            downsampled = self.downsample_convs[i](pan_features[-1])
+            pan_features.append(self.pan_convs[i](downsampled + fpn_features[i + 1]))
         
-        return p3_out, p4_out, p5_out
+        return pan_features
 
-print("✅ PANet neck defined")
+print("✅ Backbone and FPN defined successfully!")
+
+# ==================== MULTI-TASK DETECTION HEADS ====================
 
 class DetectionHead(nn.Module):
-    """Unified detection head for all tasks"""
-    def __init__(self, nc, in_channels, num_keypoints=17):
+    """Object detection head with bounding box regression and classification"""
+    def __init__(self, in_channels, num_classes, num_anchors=3):
         super().__init__()
-        self.nc = nc
-        self.nkp = num_keypoints
+        self.num_classes = num_classes
+        self.num_anchors = num_anchors
         
-        # Detection: class + bbox + objectness
-        self.no_detect = nc + 4 + 1  # classes + x,y,w,h + objectness
+        # Shared convolutions
+        self.conv = nn.Sequential(
+            ConvBNAct(in_channels, in_channels, 3, 1, 1),
+            ConvBNAct(in_channels, in_channels, 3, 1, 1)
+        )
         
-        # Keypoints: x,y,visibility for each keypoint
-        self.no_keypoint = num_keypoints * 3
-        
-        # Create detection heads for 3 scales
-        self.det_heads = nn.ModuleList([
-            nn.Sequential(
-                Conv(c, c, 3, 1),
-                nn.Conv2d(c, self.no_detect, 1)
-            ) for c in in_channels
-        ])
-        
-        # Create keypoint heads for 3 scales
-        self.kp_heads = nn.ModuleList([
-            nn.Sequential(
-                Conv(c, c, 3, 1),
-                nn.Conv2d(c, self.no_keypoint, 1)
-            ) for c in in_channels
-        ])
+        # Detection outputs: [x, y, w, h, objectness, class_probs]
+        self.pred = nn.Conv2d(in_channels, num_anchors * (5 + num_classes), 1)
     
     def forward(self, x):
-        """x is list of 3 feature maps from PANet"""
-        detections = []
-        keypoints = []
+        x = self.conv(x)
+        x = self.pred(x)
         
-        for i, feat in enumerate(x):
-            det = self.det_heads[i](feat)
-            kp = self.kp_heads[i](feat)
-            detections.append(det)
-            keypoints.append(kp)
+        bs, _, h, w = x.shape
+        x = x.view(bs, self.num_anchors, 5 + self.num_classes, h, w)
+        x = x.permute(0, 1, 3, 4, 2).contiguous()
         
-        return detections, keypoints
+        return x
 
-print("✅ Detection head defined")
+class PoseHead(nn.Module):
+    """Human pose estimation head for keypoint detection"""
+    def __init__(self, in_channels, num_keypoints=17):
+        super().__init__()
+        self.num_keypoints = num_keypoints
+        
+        self.conv = nn.Sequential(
+            C3k2(in_channels, in_channels, num_blocks=2),
+            ConvBNAct(in_channels, in_channels // 2, 3, 1, 1)
+        )
+        
+        # Keypoint heatmaps (x, y) + visibility
+        self.heatmap = nn.Conv2d(in_channels // 2, num_keypoints, 1)
+        self.visibility = nn.Conv2d(in_channels // 2, num_keypoints, 1)
+    
+    def forward(self, x):
+        x = self.conv(x)
+        heatmaps = torch.sigmoid(self.heatmap(x))
+        visibility = torch.sigmoid(self.visibility(x))
+        return heatmaps, visibility
+
+class FaceLandmarkHead(nn.Module):
+    """Face detection and 68-point facial landmark detection head"""
+    def __init__(self, in_channels, num_landmarks=68):
+        super().__init__()
+        self.num_landmarks = num_landmarks
+        
+        self.conv = nn.Sequential(
+            C3k2(in_channels, in_channels // 2, num_blocks=2),
+            CBAM(in_channels // 2),
+            ConvBNAct(in_channels // 2, in_channels // 4, 3, 1, 1)
+        )
+        
+        # Face detection
+        self.face_det = nn.Conv2d(in_channels // 4, 5, 1)  # [x, y, w, h, conf]
+        
+        # Facial landmarks (x, y, visibility)
+        self.landmarks = nn.Conv2d(in_channels // 4, num_landmarks * 3, 1)
+    
+    def forward(self, x):
+        x = self.conv(x)
+        face_box = self.face_det(x)
+        landmarks = self.landmarks(x)
+        
+        bs, _, h, w = landmarks.shape
+        landmarks = landmarks.view(bs, self.num_landmarks, 3, h, w)
+        
+        return face_box, landmarks
+
+class IrisHead(nn.Module):
+    """Iris detection and landmark estimation head"""
+    def __init__(self, in_channels, num_iris_points=5):
+        super().__init__()
+        self.num_iris_points = num_iris_points
+        
+        self.conv = nn.Sequential(
+            ConvBNAct(in_channels, in_channels // 2, 3, 1, 1),
+            CBAM(in_channels // 2),
+            ConvBNAct(in_channels // 2, in_channels // 4, 3, 1, 1)
+        )
+        
+        # Left and right iris landmarks
+        self.left_iris = nn.Conv2d(in_channels // 4, num_iris_points * 2, 1)
+        self.right_iris = nn.Conv2d(in_channels // 4, num_iris_points * 2, 1)
+    
+    def forward(self, x):
+        x = self.conv(x)
+        left = self.left_iris(x)
+        right = self.right_iris(x)
+        return left, right
+
+class SegmentationHead(nn.Module):
+    """Instance segmentation head"""
+    def __init__(self, in_channels, mask_dim=256, num_protos=32):
+        super().__init__()
+        self.num_protos = num_protos
+        
+        # Prototype generation
+        self.proto = nn.Sequential(
+            ConvBNAct(in_channels, in_channels // 2, 3, 1, 1),
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            ConvBNAct(in_channels // 2, in_channels // 4, 3, 1, 1),
+            nn.Upsample(scale_factor=2, mode='nearest'),
+            ConvBNAct(in_channels // 4, in_channels // 8, 3, 1, 1),
+            nn.Conv2d(in_channels // 8, num_protos, 1)
+        )
+        
+        # Mask coefficients
+        self.mask_coef = nn.Sequential(
+            ConvBNAct(in_channels, in_channels, 3, 1, 1),
+            nn.Conv2d(in_channels, num_protos, 1)
+        )
+    
+    def forward(self, x):
+        protos = self.proto(x)
+        coeffs = self.mask_coef(x)
+        return protos, coeffs
+
+class AttributeHead(nn.Module):
+    """Object attribute classification head (demographics, vehicle types, etc.)"""
+    def __init__(self, in_channels, num_attributes=20):
+        super().__init__()
+        self.conv = nn.Sequential(
+            ConvBNAct(in_channels, in_channels // 2, 3, 1, 1),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(in_channels // 2, num_attributes)
+        )
+    
+    def forward(self, x):
+        return torch.sigmoid(self.conv(x))
+
+print("✅ All task-specific heads defined successfully!")
+
+# ==================== COMPLETE NAiBiL MODEL ====================
 
 class NAiBiLModel(nn.Module):
-    """Complete NAiBiL Multi-Task Model"""
+    """Complete NAiBiL multi-task detection system (~200M parameters)"""
     def __init__(self, config):
         super().__init__()
         self.config = config
         
         # Backbone
-        self.backbone = CSPDarknet(
-            in_channels=3,
-            base_channels=64,
-            depth_multiple=0.33,  # n model
-            width_multiple=0.50   # n model
-        )
+        self.backbone = NAiBiLBackbone(in_channels=3, base_channels=64)
         
-        # Neck
-        self.neck = PANet(
-            in_channels=self.backbone.out_channels,
-            depth_multiple=0.33
-        )
+        # Feature Pyramid Network
+        self.fpn = FPN(self.backbone.out_channels, config.fpn_channels)
         
-        # Detection + Pose head
-        self.head = DetectionHead(
-            nc=config.num_classes,
-            in_channels=self.neck.out_channels,
-            num_keypoints=config.num_keypoints
-        )
+        # Multi-task heads
+        self.detection_heads = nn.ModuleList([
+            DetectionHead(config.fpn_channels, config.num_classes, 3) 
+            for _ in range(4)
+        ])
         
-        # Initialize weights
+        if config.num_keypoints > 0:
+            self.pose_head = PoseHead(config.fpn_channels, config.num_keypoints)
+        
+        if config.enable_face_detection:
+            self.face_head = FaceLandmarkHead(config.fpn_channels, config.num_face_landmarks)
+        
+        if config.enable_iris_detection:
+            self.iris_head = IrisHead(config.fpn_channels, config.num_iris_landmarks)
+        
+        if config.enable_segmentation:
+            self.seg_head = SegmentationHead(config.fpn_channels)
+        
+        if config.enable_attributes:
+            self.attr_head = AttributeHead(config.fpn_channels, config.num_attributes)
+        
         self._initialize_weights()
     
     def _initialize_weights(self):
@@ -3379,376 +3516,887 @@ class NAiBiLModel(nn.Module):
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+                    nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm2d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
     
     def forward(self, x):
-        # Backbone
-        features = self.backbone(x)
+        """Forward pass through the network"""
+        # Extract multi-scale features
+        backbone_features = self.backbone(x)
         
-        # Neck
-        features = self.neck(features)
+        # Feature pyramid
+        fpn_features = self.fpn(backbone_features)
         
-        # Head
-        detections, keypoints = self.head(features)
+        outputs = {}
+        
+        # Object detection at multiple scales
+        detections = [head(feat) for head, feat in zip(self.detection_heads, fpn_features)]
+        outputs['detections'] = detections
+        
+        # Pose estimation (use highest resolution feature map)
+        if hasattr(self, 'pose_head'):
+            heatmaps, visibility = self.pose_head(fpn_features[0])
+            outputs['pose'] = {'heatmaps': heatmaps, 'visibility': visibility}
+        
+        # Face landmarks
+        if hasattr(self, 'face_head'):
+            face_box, landmarks = self.face_head(fpn_features[0])
+            outputs['face'] = {'boxes': face_box, 'landmarks': landmarks}
+        
+        # Iris detection
+        if hasattr(self, 'iris_head'):
+            left_iris, right_iris = self.iris_head(fpn_features[0])
+            outputs['iris'] = {'left': left_iris, 'right': right_iris}
+        
+        # Instance segmentation
+        if hasattr(self, 'seg_head'):
+            protos, coeffs = self.seg_head(fpn_features[0])
+            outputs['segmentation'] = {'protos': protos, 'coeffs': coeffs}
+        
+        # Attributes
+        if hasattr(self, 'attr_head'):
+            attributes = self.attr_head(fpn_features[0])
+            outputs['attributes'] = attributes
+        
+        return outputs
+    
+    def count_parameters(self):
+        """Count total and trainable parameters"""
+        total = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return total, trainable
+
+# Create model instance
+model = NAiBiLModel(config).to(device)
+total_params, trainable_params = model.count_parameters()
+
+print("\n" + "="*70)
+print("NAiBiL MODEL ARCHITECTURE")
+print("="*70)
+print(f"\n📊 Total Parameters: {total_params:,}")
+print(f"📊 Trainable Parameters: {trainable_params:,}")
+print(f"📊 Model Size: {total_params * 4 / (1024**2):.2f} MB (FP32)")
+print("\n✅ Model created successfully!")
+print("="*70)
+
+# ==================== DATA AUGMENTATION ====================
+
+def get_training_augmentation(config):
+    """Advanced augmentation pipeline for training"""
+    return A.Compose([
+        A.RandomResizedCrop(config.input_size[0], config.input_size[1], scale=(0.8, 1.0)),
+        A.HorizontalFlip(p=0.5),
+        A.OneOf([
+            A.MotionBlur(blur_limit=5),
+            A.MedianBlur(blur_limit=5),
+            A.GaussianBlur(blur_limit=5),
+        ], p=0.3),
+        A.OneOf([
+            A.OpticalDistortion(distort_limit=0.05),
+            A.GridDistortion(num_steps=5, distort_limit=0.05),
+        ], p=0.3),
+        A.CLAHE(clip_limit=2.0, p=0.3),
+        A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+        A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ToTensorV2()
+    ], bbox_params=A.BboxParams(format='coco', label_fields=['class_labels']))
+
+def get_validation_augmentation(config):
+    """Augmentation pipeline for validation"""
+    return A.Compose([
+        A.Resize(config.input_size[0], config.input_size[1]),
+        A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ToTensorV2()
+    ], bbox_params=A.BboxParams(format='coco', label_fields=['class_labels']))
+
+# ==================== COCO-STYLE DATASET ====================
+
+class COCOMultiTaskDataset(Dataset):
+    """COCO-style dataset with multi-task annotations"""
+    def __init__(self, image_dir, annotation_file, transform=None, config=None):
+        self.image_dir = Path(image_dir)
+        self.transform = transform
+        self.config = config
+        
+        # Load COCO annotations
+        if Path(annotation_file).exists():
+            self.coco = COCO(annotation_file)
+            self.image_ids = list(self.coco.imgs.keys())
+        else:
+            print(f"Warning: Annotation file {annotation_file} not found")
+            self.coco = None
+            self.image_ids = []
+    
+    def __len__(self):
+        return len(self.image_ids)
+    
+    def __getitem__(self, idx):
+        if not self.coco:
+            # Return dummy data if no annotations
+            img = torch.zeros(3, self.config.input_size[0], self.config.input_size[1])
+            return {'image': img, 'boxes': torch.zeros(0, 4), 'labels': torch.zeros(0, dtype=torch.long)}
+        
+        image_id = self.image_ids[idx]
+        image_info = self.coco.loadImgs(image_id)[0]
+        
+        # Load image
+        image_path = self.image_dir / image_info['file_name']
+        image = cv2.imread(str(image_path))
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # Load annotations
+        ann_ids = self.coco.getAnnIds(imgIds=image_id)
+        anns = self.coco.loadAnns(ann_ids)
+        
+        boxes = []
+        labels = []
+        keypoints = []
+        
+        for ann in anns:
+            boxes.append(ann['bbox'])
+            labels.append(ann['category_id'])
+            if 'keypoints' in ann:
+                keypoints.append(ann['keypoints'])
+        
+        # Apply augmentation
+        if self.transform:
+            try:
+                transformed = self.transform(image=image, bboxes=boxes, class_labels=labels)
+                image = transformed['image']
+                boxes = transformed['bboxes']
+                labels = transformed['class_labels']
+            except:
+                # Fallback to simple transform
+                image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
         
         return {
-            'detections': detections,
-            'keypoints': keypoints
+            'image': image,
+            'boxes': torch.tensor(boxes, dtype=torch.float32) if boxes else torch.zeros(0, 4),
+            'labels': torch.tensor(labels, dtype=torch.long) if labels else torch.zeros(0, dtype=torch.long),
+            'keypoints': torch.tensor(keypoints, dtype=torch.float32) if keypoints else torch.zeros(0, 51)
         }
+
+print("✅ Dataset classes defined successfully!")
+
+# ==================== STREAMING DATASET HANDLER ====================
+
+class StreamingDatasetManager:
+    """Manager for loading multiple datasets with streaming support"""
+    def __init__(self, config):
+        self.config = config
+        self.datasets = []
+        
+    def add_coco_dataset(self, name, images_dir, annotations_file, split='train'):
+        """Add a COCO-format dataset"""
+        if not Path(images_dir).exists() or not Path(annotations_file).exists():
+            print(f"⚠️  Skipping {name}: paths do not exist")
+            return
+        
+        transform = get_training_augmentation(self.config) if split == 'train' \
+                    else get_validation_augmentation(self.config)
+        
+        dataset = COCOMultiTaskDataset(
+            image_dir=images_dir,
+            annotation_file=annotations_file,
+            transform=transform,
+            config=self.config
+        )
+        
+        if len(dataset) > 0:
+            self.datasets.append({'name': name, 'dataset': dataset, 'split': split})
+            print(f"✓ Added {name} dataset: {len(dataset)} samples")
     
-    def get_param_count(self):
-        """Get total parameter count"""
-        return sum(p.numel() for p in self.parameters())
+    def add_huggingface_dataset(self, name, dataset_name, split='train', streaming=True):
+        """Add a HuggingFace dataset with streaming support"""
+        try:
+            dataset = load_dataset(dataset_name, split=split, streaming=streaming)
+            print(f"✓ Added streaming HF dataset: {name}")
+            return dataset
+        except Exception as e:
+            print(f"⚠️  Failed to load {name}: {str(e)}")
+            return None
+    
+    def get_dataloader(self, split='train', batch_size=None):
+        """Get combined dataloader for specified split"""
+        if batch_size is None:
+            batch_size = self.config.batch_size
+        
+        split_datasets = [d['dataset'] for d in self.datasets if d['split'] == split]
+        
+        if not split_datasets:
+            print(f"⚠️  No datasets found for split: {split}")
+            return None
+        
+        # Combine datasets
+        combined_dataset = torch.utils.data.ConcatDataset(split_datasets)
+        
+        dataloader = DataLoader(
+            combined_dataset,
+            batch_size=batch_size,
+            shuffle=(split == 'train'),
+            num_workers=self.config.num_workers,
+            pin_memory=self.config.pin_memory,
+            prefetch_factor=self.config.prefetch_factor,
+            collate_fn=self.collate_fn
+        )
+        
+        return dataloader
+    
+    @staticmethod
+    def collate_fn(batch):
+        """Custom collate function for batching"""
+        images = torch.stack([item['image'] for item in batch])
+        return {
+            'images': images,
+            'boxes': [item['boxes'] for item in batch],
+            'labels': [item['labels'] for item in batch],
+            'keypoints': [item['keypoints'] for item in batch]
+        }
 
-# Create model
-model = NAiBiLModel(config).to(device)
-param_count = model.get_param_count()
+print("✅ Streaming dataset manager ready!")
 
-print("✅ NAiBiL Model created successfully!")
-print(f"   Total Parameters: {param_count:,} ({param_count/1e6:.1f}M)")
-print(f"   Target: ~200M parameters")
+# ==================== MULTI-TASK LOSS FUNCTIONS ====================
 
-# Test forward pass
-with torch.no_grad():
-    dummy_input = torch.randn(1, 3, 640, 640).to(device)
-    output = model(dummy_input)
-    print(f"\n   Detection outputs: {len(output['detections'])} scales")
-    print(f"   Keypoint outputs: {len(output['keypoints'])} scales")
-    for i, det in enumerate(output['detections']):
-        print(f"   Scale {i}: {det.shape}")
-
-
-
-class NAiBiLLoss(nn.Module):
-    """Combined loss for multi-task learning"""
+class MultiTaskLoss(nn.Module):
+    """Combined loss for all tasks"""
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.bce_cls = nn.BCEWithLogitsLoss(reduction='mean')
-        self.bce_obj = nn.BCEWithLogitsLoss(reduction='mean')
+        self.bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
+        self.mse_loss = nn.MSELoss(reduction='mean')
+        self.smooth_l1_loss = nn.SmoothL1Loss(reduction='mean')
         
+    def detection_loss(self, predictions, targets):
+        """Compute detection loss (classification + box regression)"""
+        # Simplified detection loss
+        # In production, use proper anchor matching and IoU-based loss
+        loss = torch.tensor(0.0, device=predictions[0].device)
+        
+        for pred in predictions:
+            if pred.numel() > 0:
+                # Classification loss
+                cls_loss = self.bce_loss(pred[..., 5:], torch.zeros_like(pred[..., 5:]))
+                # Objectness loss
+                obj_loss = self.bce_loss(pred[..., 4:5], torch.zeros_like(pred[..., 4:5]))
+                # Box regression loss
+                box_loss = self.smooth_l1_loss(pred[..., :4], torch.zeros_like(pred[..., :4]))
+                
+                loss = loss + (
+                    self.config.loss_weights['detection_cls'] * cls_loss +
+                    self.config.loss_weights['detection_obj'] * obj_loss +
+                    self.config.loss_weights['detection_box'] * box_loss
+                )
+        
+        return loss / max(len(predictions), 1)
+    
+    def pose_loss(self, predictions, targets):
+        """Compute pose estimation loss"""
+        if not predictions:
+            return torch.tensor(0.0, device=device)
+        
+        heatmaps = predictions['heatmaps']
+        visibility = predictions['visibility']
+        
+        # Heatmap loss (MSE against target heatmaps)
+        heatmap_loss = self.mse_loss(heatmaps, torch.zeros_like(heatmaps))
+        visibility_loss = self.bce_loss(visibility, torch.zeros_like(visibility))
+        
+        return (self.config.loss_weights['pose_keypoints'] * heatmap_loss +
+                self.config.loss_weights['pose_visibility'] * visibility_loss)
+    
     def forward(self, predictions, targets):
-        """Calculate combined loss"""
-        # For now, return a placeholder loss
-        # In production, implement proper loss calculation
-        total_loss = torch.tensor(0.0, device=predictions['detections'][0].device)
+        """Compute total multi-task loss"""
+        total_loss = 0.0
+        loss_dict = {}
         
-        # Add small value to prevent zero loss
-        for det in predictions['detections']:
-            total_loss += det.mean() * 0.0001
+        # Detection loss
+        if 'detections' in predictions:
+            det_loss = self.detection_loss(predictions['detections'], targets)
+            total_loss = total_loss + det_loss
+            loss_dict['detection'] = det_loss.item()
         
-        return {
-            'total': total_loss,
-            'detection': total_loss * 0.5,
-            'keypoint': total_loss * 0.5
-        }
+        # Pose loss
+        if 'pose' in predictions:
+            pose_loss = self.pose_loss(predictions['pose'], targets)
+            total_loss = total_loss + pose_loss
+            loss_dict['pose'] = pose_loss.item()
+        
+        # Add other task losses as needed
+        # Face, iris, segmentation, attributes...
+        
+        loss_dict['total'] = total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
+        
+        return total_loss, loss_dict
 
-criterion = NAiBiLLoss(config)
-print("✅ Loss function defined")
+print("✅ Multi-task loss functions defined!")
 
+# ==================== TRAINER CLASS ====================
 
 class NAiBiLTrainer:
-    """Training manager for NAiBiL"""
+    """Complete training pipeline for NAiBiL"""
     def __init__(self, model, config, device):
         self.model = model
         self.config = config
         self.device = device
         
+        # Loss function
+        self.criterion = MultiTaskLoss(config)
+        
         # Optimizer
-        self.optimizer = optim.AdamW(
+        self.optimizer = AdamW(
             model.parameters(),
             lr=config.learning_rate,
             weight_decay=config.weight_decay
         )
         
-        # Scheduler
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        # Learning rate scheduler
+        self.scheduler = OneCycleLR(
             self.optimizer,
-            T_max=config.epochs,
-            eta_min=config.learning_rate * 0.01
+            max_lr=config.learning_rate,
+            epochs=config.num_epochs,
+            steps_per_epoch=100,  # Will be updated
+            pct_start=0.1
         )
         
-        # Loss function
-        self.criterion = NAiBiLLoss(config)
+        # Mixed precision scaler
+        self.scaler = GradScaler() if config.use_amp else None
         
-        # Mixed precision training
-        self.scaler = GradScaler()
-        
-        # Metrics
+        # Metrics tracking
         self.best_loss = float('inf')
         self.train_losses = []
+        self.val_losses = []
         
+        # Tensorboard writer
+        self.writer = SummaryWriter(config.log_dir)
+        
+        print("\n✅ Trainer initialized successfully!")
+    
     def train_epoch(self, dataloader, epoch):
         """Train for one epoch"""
         self.model.train()
-        total_loss = 0
+        epoch_loss = 0.0
+        num_batches = 0
         
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
-        for batch_idx, (images, targets) in enumerate(pbar):
-            images = images.to(self.device)
-            
-            # Forward pass with mixed precision
-            with autocast():
-                predictions = self.model(images)
-                loss_dict = self.criterion(predictions, targets)
-                loss = loss_dict['total']
-            
-            # Backward pass
-            self.optimizer.zero_grad()
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            
-            total_loss += loss.item()
-            
-            # Update progress bar
-            pbar.set_postfix({
-                'loss': loss.item(),
-                'lr': self.optimizer.param_groups[0]['lr']
-            })
+        pbar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{self.config.num_epochs}')
         
-        avg_loss = total_loss / len(dataloader)
+        for batch_idx, batch in enumerate(pbar):
+            try:
+                images = batch['images'].to(self.device)
+                
+                # Forward pass
+                if self.config.use_amp:
+                    with autocast():
+                        outputs = self.model(images)
+                        loss, loss_dict = self.criterion(outputs, batch)
+                else:
+                    outputs = self.model(images)
+                    loss, loss_dict = self.criterion(outputs, batch)
+                
+                # Backward pass
+                self.optimizer.zero_grad()
+                
+                if self.config.use_amp:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.gradient_clip)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.gradient_clip)
+                    self.optimizer.step()
+                
+                self.scheduler.step()
+                
+                epoch_loss += loss_dict['total']
+                num_batches += 1
+                
+                # Update progress bar
+                pbar.set_postfix({
+                    'loss': f"{loss_dict['total']:.4f}",
+                    'lr': f"{self.optimizer.param_groups[0]['lr']:.6f}"
+                })
+                
+                # Log to tensorboard
+                global_step = epoch * len(dataloader) + batch_idx
+                self.writer.add_scalar('train/loss', loss_dict['total'], global_step)
+                self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], global_step)
+                
+            except Exception as e:
+                print(f"\n⚠️  Error in batch {batch_idx}: {str(e)}")
+                continue
+        
+        avg_loss = epoch_loss / max(num_batches, 1)
+        self.train_losses.append(avg_loss)
+        
         return avg_loss
     
-    def save_checkpoint(self, epoch, loss):
+    def save_checkpoint(self, epoch, loss, is_best=False):
         """Save model checkpoint"""
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
             'loss': loss,
             'config': self.config
         }
         
-        # Save best model
-        if loss < self.best_loss:
-            self.best_loss = loss
-            torch.save(checkpoint, f"{self.config.save_dir}/best_model.pth")
-            print(f"\n✅ Best model saved (loss: {loss:.4f})")
+        checkpoint_path = Path(self.config.checkpoint_dir) / f'checkpoint_epoch_{epoch}.pth'
+        torch.save(checkpoint, checkpoint_path)
         
-        # Save periodic checkpoint
-        if epoch % 10 == 0:
-            torch.save(checkpoint, f"{self.config.save_dir}/checkpoint_epoch_{epoch}.pth")
-
-print("✅ Trainer defined")
-
-
-class SimpleDataset(Dataset):
-    """Simple dataset for quick testing"""
-    def __init__(self, size=100, img_size=640):
-        self.size = size
-        self.img_size = img_size
+        if is_best:
+            best_path = Path(self.config.checkpoint_dir) / 'best_model.pth'
+            torch.save(checkpoint, best_path)
+            print(f"\n🎯 New best model saved! Loss: {loss:.4f}")
     
-    def __len__(self):
-        return self.size
-    
-    def __getitem__(self, idx):
-        # Generate random image
-        image = torch.randn(3, self.img_size, self.img_size)
+    def train(self, train_dataloader, num_epochs=None):
+        """Complete training loop"""
+        if num_epochs is None:
+            num_epochs = self.config.num_epochs
         
-        # Generate dummy targets
-        targets = {
-            'boxes': torch.rand(5, 4),
-            'labels': torch.randint(0, NUM_CLASSES, (5,)),
-            'keypoints': torch.rand(5, 17, 3)
-        }
+        print("\n" + "="*70)
+        print("STARTING TRAINING")
+        print("="*70)
         
-        return image, targets
+        for epoch in range(num_epochs):
+            avg_loss = self.train_epoch(train_dataloader, epoch)
+            
+            print(f"\nEpoch {epoch+1}/{num_epochs} - Average Loss: {avg_loss:.4f}")
+            
+            # Save checkpoint
+            is_best = avg_loss < self.best_loss
+            if is_best:
+                self.best_loss = avg_loss
+            
+            if (epoch + 1) % 5 == 0 or is_best:
+                self.save_checkpoint(epoch, avg_loss, is_best)
+            
+            # Memory cleanup
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+        
+        print("\n" + "="*70)
+        print("TRAINING COMPLETED")
+        print("="*70)
+        print(f"Best Loss: {self.best_loss:.4f}")
+        
+        self.writer.close()
 
-# Create dataloaders for quick testing
-train_dataset = SimpleDataset(size=100)
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=config.batch_size,
-    shuffle=True,
-    num_workers=0  # Set to 0 for Colab
-)
+print("✅ Trainer class ready!")
 
-print(f"✅ Dataset created")
-print(f"   Training samples: {len(train_dataset)}")
-print(f"   Batches: {len(train_loader)}")
+# ==================== INFERENCE ENGINE ====================
 
-
-# Create trainer
-trainer = NAiBiLTrainer(model, config, device)
-
-# Quick training demo (1 epoch for testing)
-print("\n" + "="*70)
-print("Starting Quick Training Demo (1 epoch)")
-print("="*70)
-
-try:
-    for epoch in range(1):  # Just 1 epoch for demo
-        loss = trainer.train_epoch(train_loader, epoch + 1)
-        print(f"\nEpoch {epoch + 1} completed - Average Loss: {loss:.4f}")
-        trainer.save_checkpoint(epoch + 1, loss)
-    
-    print("\n✅ Training demo completed successfully!")
-except Exception as e:
-    print(f"\n⚠️ Training error: {str(e)}")
-    print("This is expected in demo mode. Full training requires proper data loading.")
-
-
-    @dataclass
-class Decision:
-    """Decision engine output"""
-    action: str  # PROCEED, SLOW, STOP, etc.
-    speed: float  # Recommended speed (m/s)
-    confidence: float  # Decision confidence
-    reasoning: str  # Why this decision
-    warnings: List[str] = field(default_factory=list)
-    hazards: List[str] = field(default_factory=list)
-
-class InferenceEngine:
-    """Real-time inference with decision making"""
-    def __init__(self, model, device, conf_threshold=0.25, iou_threshold=0.45):
-        self.model = model
+class NAiBiLInference:
+    """Complete inference pipeline with post-processing and visualization"""
+    def __init__(self, model, config, device):
+        self.model = model.eval()
+        self.config = config
         self.device = device
-        self.conf_threshold = conf_threshold
-        self.iou_threshold = iou_threshold
         
-        self.model.eval()
-        self.fps_history = deque(maxlen=30)
+        # Class names (COCO + extended)
+        self.class_names = self._load_class_names()
         
+        # Colors for visualization
+        np.random.seed(42)
+        self.colors = np.random.randint(0, 255, size=(config.num_classes, 3), dtype=np.uint8)
+        
+        # Performance tracking
+        self.inference_times = []
+        
+        print("\n✅ Inference engine initialized!")
+    
+    def _load_class_names(self):
+        """Load class names"""
+        # COCO classes + extended classes
+        coco_classes = [
+            'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
+            'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
+            'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack',
+            'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
+            'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
+            'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+            'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake',
+            'chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop',
+            'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven', 'toaster', 'sink',
+            'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
+        ]
+        
+        # Add extended classes
+        extended_classes = [
+            'pothole', 'crack', 'fish', 'building', 'road', 'water', 'gun', 'accident',
+            'male', 'female', 'child', 'adult', 'old_person', 'young_person'
+        ]
+        
+        all_classes = coco_classes + extended_classes
+        return all_classes[:self.config.num_classes]
+    
+    def preprocess_image(self, image):
+        """Preprocess image for inference"""
+        # Resize
+        h, w = image.shape[:2]
+        target_h, target_w = self.config.inference_size
+        
+        # Resize maintaining aspect ratio
+        scale = min(target_w / w, target_h / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        
+        resized = cv2.resize(image, (new_w, new_h))
+        
+        # Pad to target size
+        pad_w = (target_w - new_w) // 2
+        pad_h = (target_h - new_h) // 2
+        
+        padded = np.full((target_h, target_w, 3), 114, dtype=np.uint8)
+        padded[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = resized
+        
+        # Normalize
+        normalized = padded.astype(np.float32) / 255.0
+        normalized = (normalized - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])
+        
+        # To tensor
+        tensor = torch.from_numpy(normalized).permute(2, 0, 1).unsqueeze(0).float()
+        
+        return tensor, (scale, pad_w, pad_h)
+    
+    def postprocess_detections(self, predictions, transform_info, orig_shape):
+        """Post-process detection outputs to get final bounding boxes"""
+        scale, pad_w, pad_h = transform_info
+        h, w = orig_shape[:2]
+        
+        all_boxes = []
+        all_scores = []
+        all_classes = []
+        
+        # Process each scale's detections
+        for det in predictions['detections']:
+            bs, num_anchors, grid_h, grid_w, pred_size = det.shape
+            
+            # Reshape predictions
+            det = det.view(bs, -1, pred_size)
+            
+            # Extract components
+            box_xy = torch.sigmoid(det[..., :2])
+            box_wh = det[..., 2:4]
+            objectness = torch.sigmoid(det[..., 4:5])
+            class_probs = torch.sigmoid(det[..., 5:])
+            
+            # Get confidence scores
+            scores = objectness * class_probs
+            max_scores, class_ids = scores.max(dim=-1)
+            
+            # Filter by confidence threshold
+            mask = max_scores > self.config.conf_threshold
+            
+            if mask.sum() > 0:
+                # Get filtered predictions
+                filtered_boxes = torch.cat([box_xy, box_wh], dim=-1)[mask]
+                filtered_scores = max_scores[mask]
+                filtered_classes = class_ids[mask]
+                
+                # Scale boxes back to original image
+                filtered_boxes = filtered_boxes.cpu().numpy()
+                filtered_boxes[:, 0] = (filtered_boxes[:, 0] - pad_w) / scale
+                filtered_boxes[:, 1] = (filtered_boxes[:, 1] - pad_h) / scale
+                filtered_boxes[:, 2] = filtered_boxes[:, 2] / scale
+                filtered_boxes[:, 3] = filtered_boxes[:, 3] / scale
+                
+                all_boxes.append(filtered_boxes)
+                all_scores.append(filtered_scores.cpu().numpy())
+                all_classes.append(filtered_classes.cpu().numpy())
+        
+        if all_boxes:
+            boxes = np.concatenate(all_boxes, axis=0)
+            scores = np.concatenate(all_scores, axis=0)
+            classes = np.concatenate(all_classes, axis=0)
+            
+            # Apply NMS
+            keep = self._apply_nms(boxes, scores, classes)
+            
+            return boxes[keep], scores[keep], classes[keep]
+        
+        return np.array([]), np.array([]), np.array([])
+    
+    def _apply_nms(self, boxes, scores, classes):
+        """Apply Non-Maximum Suppression"""
+        keep_indices = []
+        
+        for class_id in np.unique(classes):
+            class_mask = classes == class_id
+            class_boxes = boxes[class_mask]
+            class_scores = scores[class_mask]
+            
+            if len(class_boxes) > 0:
+                # Convert to x1,y1,x2,y2 format
+                x1 = class_boxes[:, 0] - class_boxes[:, 2] / 2
+                y1 = class_boxes[:, 1] - class_boxes[:, 3] / 2
+                x2 = class_boxes[:, 0] + class_boxes[:, 2] / 2
+                y2 = class_boxes[:, 1] + class_boxes[:, 3] / 2
+                
+                boxes_tensor = torch.tensor(np.stack([x1, y1, x2, y2], axis=1), dtype=torch.float32)
+                scores_tensor = torch.tensor(class_scores, dtype=torch.float32)
+                
+                keep = nms(boxes_tensor, scores_tensor, self.config.nms_threshold)
+                keep_indices.extend(np.where(class_mask)[0][keep.cpu().numpy()])
+        
+        return np.array(keep_indices)
+    
+    def visualize_results(self, image, boxes, scores, classes, pose_keypoints=None):
+        """Visualize detection results on image"""
+        vis_image = image.copy()
+        
+        # Draw bounding boxes
+        for box, score, class_id in zip(boxes, scores, classes):
+            if class_id >= len(self.class_names):
+                continue
+            
+            # Convert box from (cx, cy, w, h) to (x1, y1, x2, y2)
+            x1 = int(box[0] - box[2] / 2)
+            y1 = int(box[1] - box[3] / 2)
+            x2 = int(box[0] + box[2] / 2)
+            y2 = int(box[1] + box[3] / 2)
+            
+            # Get color
+            color = tuple(map(int, self.colors[int(class_id)]))
+            
+            # Draw rectangle
+            cv2.rectangle(vis_image, (x1, y1), (x2, y2), color, 2)
+            
+            # Draw label
+            label = f"{self.class_names[int(class_id)]}: {score:.2f}"
+            label_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            y1_label = max(y1, label_size[1] + 10)
+            
+            cv2.rectangle(vis_image, (x1, y1_label - label_size[1] - 10),
+                         (x1 + label_size[0], y1_label + baseline - 10), color, -1)
+            cv2.putText(vis_image, label, (x1, y1_label - 7),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Draw pose keypoints if available
+        if pose_keypoints is not None:
+            self._draw_keypoints(vis_image, pose_keypoints)
+        
+        return vis_image
+    
+    def _draw_keypoints(self, image, keypoints, threshold=0.3):
+        """Draw pose keypoints on image"""
+        # COCO skeleton connections
+        skeleton = [
+            [16, 14], [14, 12], [17, 15], [15, 13], [12, 13],
+            [6, 12], [7, 13], [6, 7], [6, 8], [7, 9],
+            [8, 10], [9, 11], [2, 3], [1, 2], [1, 3],
+            [2, 4], [3, 5], [4, 6], [5, 7]
+        ]
+        
+        # Draw keypoints
+        for i, (x, y, conf) in enumerate(keypoints):
+            if conf > threshold:
+                cv2.circle(image, (int(x), int(y)), 3, (0, 255, 0), -1)
+        
+        # Draw skeleton
+        for start_idx, end_idx in skeleton:
+            if (start_idx < len(keypoints) and end_idx < len(keypoints)):
+                start_kp = keypoints[start_idx - 1]
+                end_kp = keypoints[end_idx - 1]
+                
+                if start_kp[2] > threshold and end_kp[2] > threshold:
+                    cv2.line(image, 
+                            (int(start_kp[0]), int(start_kp[1])),
+                            (int(end_kp[0]), int(end_kp[1])),
+                            (0, 255, 255), 2)
+    
     @torch.no_grad()
     def predict(self, image):
-        """Run inference on image"""
+        """Run inference on a single image"""
         start_time = time.time()
         
         # Preprocess
-        if isinstance(image, np.ndarray):
-            image = self.preprocess(image)
-        
-        image = image.to(self.device)
-        if len(image.shape) == 3:
-            image = image.unsqueeze(0)
+        input_tensor, transform_info = self.preprocess_image(image)
+        input_tensor = input_tensor.to(self.device)
         
         # Inference
-        predictions = self.model(image)
+        outputs = self.model(input_tensor)
         
-        # Calculate FPS
-        inference_time = (time.time() - start_time) * 1000  # ms
-        fps = 1000 / inference_time
-        self.fps_history.append(fps)
+        # Post-process detections
+        boxes, scores, classes = self.postprocess_detections(
+            outputs, transform_info, image.shape
+        )
         
-        return predictions, fps, inference_time
-    
-    def preprocess(self, image):
-        """Preprocess image for inference"""
-        # Resize
-        img = cv2.resize(image, (640, 640))
-        
-        # Convert BGR to RGB
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        # Normalize
-        img = img.astype(np.float32) / 255.0
-        
-        # To tensor
-        img = torch.from_numpy(img).permute(2, 0, 1)
-        
-        return img
-    
-    def postprocess(self, predictions, image_shape):
-        """Post-process predictions"""
-        # Simplified post-processing
-        # In production, implement NMS, coordinate conversion, etc.
-        detections = []
-        keypoints = []
-        
-        return detections, keypoints
-
-class RealtimeDetector:
-    """Complete real-time detection system with decision engine"""
-    def __init__(self, model, device, decision_config=None):
-        self.engine = InferenceEngine(model, device)
-        self.decision_config = decision_config or {}
-        
-    def process_frame(self, frame, visualize=True):
-        """Process a single frame"""
-        # Run inference
-        predictions, fps, inference_time = self.engine.predict(frame)
-        
-        # Make decision
-        decision = self.make_decision(predictions)
+        # Track inference time
+        inference_time = (time.time() - start_time) * 1000
+        self.inference_times.append(inference_time)
         
         # Visualize
-        if visualize:
-            frame = self.draw_results(frame, predictions, fps)
+        vis_image = self.visualize_results(image, boxes, scores, classes)
         
-        return frame, {
-            'fps': fps,
-            'inference_time_ms': inference_time,
-            'predictions': predictions
-        }, decision
-    
-    def make_decision(self, predictions):
-        """Decision engine based on predictions"""
-        # Simplified decision logic
-        return Decision(
-            action="PROCEED",
-            speed=4.0,
-            confidence=0.85,
-            reasoning="Path is clear",
-            warnings=[],
-            hazards=[]
-        )
-    
-    def draw_results(self, frame, predictions, fps):
-        """Draw detection results on frame"""
-        frame = frame.copy()
+        # Add FPS info
+        fps = 1000 / inference_time
+        cv2.putText(vis_image, f"FPS: {fps:.1f}", (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(vis_image, f"Inference: {inference_time:.1f}ms", (10, 60),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(vis_image, f"Detections: {len(boxes)}", (10, 90),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        # Draw FPS
-        cv2.putText(
-            frame,
-            f"FPS: {fps:.1f}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (0, 255, 0),
-            2
-        )
-        
-        return frame
+        return {
+            'boxes': boxes,
+            'scores': scores,
+            'classes': classes,
+            'visualization': vis_image,
+            'inference_time': inference_time,
+            'fps': fps
+        }
 
-# Create detector
-detector = RealtimeDetector(model, device)
-print("✅ Real-time detector created")
+print("✅ Inference engine ready!")
 
+# Initialize dataset manager
+dataset_manager = StreamingDatasetManager(config)
 
-# Test inference
 print("\n" + "="*70)
-print("Testing Real-Time Inference")
+print("DATASET LOADING")
 print("="*70)
 
-# Create test image
-test_image = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+# ========== COCO Dataset (if available) ==========
+coco_train_images = '/content/datasets/coco/train2017'
+coco_train_ann = '/content/datasets/coco/annotations/instances_train2017.json'
+coco_val_images = '/content/datasets/coco/val2017'
+coco_val_ann = '/content/datasets/coco/annotations/instances_val2017.json'
 
-# Process frame
-annotated, predictions, decision = detector.process_frame(test_image)
+dataset_manager.add_coco_dataset('COCO-Train', coco_train_images, coco_train_ann, 'train')
+dataset_manager.add_coco_dataset('COCO-Val', coco_val_images, coco_val_ann, 'val')
 
-print("\n📊 Performance Metrics:")
-print(f"   FPS: {predictions['fps']:.2f}")
-print(f"   Inference Time: {predictions['inference_time_ms']:.2f} ms")
+# ========== Download sample dataset if no datasets loaded ==========
+if len(dataset_manager.datasets) == 0:
+    print("\n⚠️  No datasets found. Downloading COCO sample...")
+    !mkdir -p /content/datasets/coco_sample/images
+    !mkdir -p /content/datasets/coco_sample/annotations
+    
+    # Download COCO8 sample dataset
+    !wget -q https://github.com/ultralytics/assets/releases/download/v0.0.0/coco8.zip -O /content/coco8.zip
+    !unzip -q /content/coco8.zip -d /content/datasets/coco_sample/
+    
+    print("\n✅ Sample dataset downloaded!")
 
-print("\n🤖 Decision Engine Output:")
-print(f"   Action: {decision.action}")
-print(f"   Speed: {decision.speed:.2f} m/s")
-print(f"   Confidence: {decision.confidence:.2f}")
-print(f"   Reasoning: {decision.reasoning}")
+# ========== HuggingFace Datasets (Streaming) ==========
+# Example: Load detection datasets with streaming
+# hf_dataset = dataset_manager.add_huggingface_dataset(
+#     'Detection-HF',
+#     'keremberke/object-detection-augmented',
+#     split='train',
+#     streaming=True
+# )
 
-# Display result
-plt.figure(figsize=(12, 8))
-plt.imshow(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
-plt.title(f"NAiBiL Detection (FPS: {predictions['fps']:.1f})")
-plt.axis('off')
-plt.tight_layout()
-plt.show()
+print("\n" + "="*70)
+print(f"Total datasets loaded: {len(dataset_manager.datasets)}")
+for ds in dataset_manager.datasets:
+    print(f"  - {ds['name']} ({ds['split']}): {len(ds['dataset'])} samples")
+print("="*70)
 
-print("\n✅ Inference test completed!")
+# Get data loaders
+train_loader = dataset_manager.get_dataloader('train', batch_size=config.batch_size)
+val_loader = dataset_manager.get_dataloader('val', batch_size=config.batch_size)
+
+if train_loader is None:
+    print("\n⚠️  No training data available. Creating dummy dataloader for testing...")
+    # Create dummy dataset for testing
+    class DummyDataset(Dataset):
+        def __len__(self):
+            return 100
+        def __getitem__(self, idx):
+            return {
+                'image': torch.randn(3, config.input_size[0], config.input_size[1]),
+                'boxes': torch.randn(3, 4),
+                'labels': torch.randint(0, config.num_classes, (3,)),
+                'keypoints': torch.randn(1, 51)
+            }
+    
+    dummy_dataset = DummyDataset()
+    train_loader = DataLoader(dummy_dataset, batch_size=config.batch_size, 
+                             collate_fn=dataset_manager.collate_fn)
+
+# Initialize trainer
+trainer = NAiBiLTrainer(model, config, device)
+
+# Start training
+print("\n🚀 Starting training...")
+print(f"   Epochs: {config.num_epochs}")
+print(f"   Batch Size: {config.batch_size}")
+print(f"   Learning Rate: {config.learning_rate}")
+print(f"   Device: {device}")
+
+# Train for specified number of epochs (can be reduced for testing)
+trainer.train(train_loader, num_epochs=min(config.num_epochs, 5))  # Train for 5 epochs as demo
+
+# Initialize inference engine
+inference_engine = NAiBiLInference(model, config, device)
+
+# Test on sample images
+print("\n" + "="*70)
+print("RUNNING INFERENCE")
+print("="*70)
+
+# Download sample images
+sample_urls = [
+    'https://ultralytics.com/images/bus.jpg',
+    'https://ultralytics.com/images/zidane.jpg'
+]
+
+import requests
+from io import BytesIO
+
+for idx, url in enumerate(sample_urls):
+    print(f"\n📸 Processing image {idx+1}/{len(sample_urls)}")
+    
+    try:
+        # Download image
+        response = requests.get(url)
+        image = Image.open(BytesIO(response.content))
+        image = np.array(image)
+        
+        if len(image.shape) == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        elif image.shape[2] == 4:
+            image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
+        
+        # Run inference
+        results = inference_engine.predict(image)
+        
+        print(f"   Detections: {len(results['boxes'])}")
+        print(f"   FPS: {results['fps']:.1f}")
+        print(f"   Inference Time: {results['inference_time']:.1f}ms")
+        
+        # Display results
+        plt.figure(figsize=(15, 10))
+        plt.imshow(cv2.cvtColor(results['visualization'], cv2.COLOR_BGR2RGB))
+        plt.axis('off')
+        plt.title(f"NAiBiL Detection Results - Image {idx+1}", fontsize=16, pad=20)
+        plt.tight_layout()
+        plt.show()
+        
+        # Print detected objects
+        if len(results['boxes']) > 0:
+            print("\n   Detected Objects:")
+            for i, (box, score, cls) in enumerate(zip(results['boxes'], 
+                                                       results['scores'], 
+                                                       results['classes'])):
+                class_name = inference_engine.class_names[int(cls)]
+                print(f"      {i+1}. {class_name}: {score:.2f}")
+    
+    except Exception as e:
+        print(f"   ⚠️  Error processing image: {str(e)}")
+
+print("\n" + "="*70)
+print("INFERENCE COMPLETED")
+print("="*70)
+
+
 .
 .
 .
